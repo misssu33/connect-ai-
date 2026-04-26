@@ -131,7 +131,7 @@ function classifyGitError(stderr: string): { kind: GitErrorKind; message: string
     ) {
         return {
             kind: 'auth',
-            message: 'GitHub 로그인이 필요해요.\n\n👉 GitHub 사이트에서 토큰을 만든 뒤(Settings → Developer settings → Personal access tokens), 터미널을 열고 한 번만 `git push`를 실행하면 끝나요!'
+            message: 'GitHub 인증이 필요해요. 터미널에서 한 번 `git push`로 로그인 후 다시 시도해주세요.'
         };
     }
     if (s.includes('repository not found') || s.includes('does not appear to be a git repository') || s.includes('404')) {
@@ -189,14 +189,8 @@ function ensureBrainGitignore(brainDir: string) {
 }
 
 /** Run a git subcommand and return stdout/stderr/status — used when we need to inspect failures. */
-function gitRun(args: string[], cwd: string, timeout = 30000, token?: string | null): { status: number | null; stdout: string; stderr: string; error?: Error } {
-    // When a token is provided, inject Authorization header via -c http.extraHeader.
-    // GitHub accepts "Bearer <token>" for OAuth tokens via smart HTTP, so the token
-    // never enters the URL or remote config (avoids `git remote -v` leakage).
-    const finalArgs = token
-        ? ['-c', `http.extraHeader=Authorization: Bearer ${token}`, ...args]
-        : args;
-    const res = spawnSync('git', finalArgs, {
+function gitRun(args: string[], cwd: string, timeout = 30000): { status: number | null; stdout: string; stderr: string; error?: Error } {
+    const res = spawnSync('git', args, {
         cwd,
         encoding: 'utf-8',
         timeout,
@@ -258,29 +252,6 @@ function runCommandCaptured(
             resolve({ exitCode: -1, output: `[실행 오류] ${e.message}`, timedOut: false });
         });
     });
-}
-
-/**
- * Get a GitHub OAuth token via VS Code's built-in authentication provider.
- * No manual PAT creation needed — user just clicks "Authorize" in browser.
- * Returns null if user dismisses or auth provider is unavailable.
- */
-async function getGitHubAuthToken(createIfNone = false): Promise<string | null> {
-    try {
-        const session = await vscode.authentication.getSession(
-            'github',
-            ['repo'],
-            { createIfNone }
-        );
-        return session?.accessToken || null;
-    } catch {
-        return null;
-    }
-}
-
-/** Whether a URL points to github.com (HTTPS only — SSH uses keys, not tokens). */
-function isGitHubHttpsUrl(url: string): boolean {
-    return /^https?:\/\/(www\.)?github\.com\//i.test(url || '');
 }
 
 // ============================================================
@@ -501,13 +472,10 @@ async function _safeGitAutoSync(brainDir: string, commitMsg: string, provider: a
             gitExecSafe(['branch', '-M', remoteBranch], brainDir);
         }
 
-        // 🔐 Auto-sync only uses an EXISTING GitHub session (createIfNone: false).
-        // We never pop an OAuth dialog from background sync — that would surprise users.
-        const remoteUrl = gitExecSafe(['remote', 'get-url', 'origin'], brainDir)?.trim() || '';
-        const token = isGitHubHttpsUrl(remoteUrl) ? await getGitHubAuthToken(false) : null;
+        // 인증은 시스템 git에 맡깁니다 (osxkeychain / gh CLI / SSH 키).
 
         // Fetch first so we know whether we're behind.
-        const fetchRes = gitRun(['fetch', 'origin', remoteBranch], brainDir, 30000, token);
+        const fetchRes = gitRun(['fetch', 'origin', remoteBranch], brainDir, 30000);
         if (fetchRes.status !== 0) {
             // Fetch failure usually = auth or network. Surface details and stop.
             const err = classifyGitError(fetchRes.stderr);
@@ -528,7 +496,7 @@ async function _safeGitAutoSync(brainDir: string, commitMsg: string, provider: a
         }
 
         // Push without -f. If push fails, classify and inform the user.
-        const pushRes = gitRun(['push', '-u', 'origin', remoteBranch], brainDir, 60000, token);
+        const pushRes = gitRun(['push', '-u', 'origin', remoteBranch], brainDir, 60000);
         if (pushRes.status === 0) {
             notify(`✅ **[GitHub Sync]** 글로벌 뇌(Second Brain)에 지식이 자동 백업되었습니다!`, 5000);
         } else {
@@ -1720,7 +1688,7 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
     // ============================================================
     // 📊 Header status bar — folder + GitHub status, always visible
     // ============================================================
-    private async _sendStatusUpdate() {
+    private _sendStatusUpdate() {
         if (!this._view) return;
         const cfg = vscode.workspace.getConfiguration('connectAiLab');
         const folderPath = _isBrainDirExplicitlySet() ? _getBrainDir() : '';
@@ -1735,8 +1703,6 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
             const out = gitExecSafe(['log', '-1', '--format=%cr'], folderPath);
             if (out) lastSync = out.trim();
         }
-        // GitHub OAuth session presence — non-creating check (createIfNone: false)
-        const ghSignedIn = isGitHubHttpsUrl(githubUrl) ? !!(await getGitHubAuthToken(false)) : false;
         this._view.webview.postMessage({
             type: 'statusUpdate',
             value: {
@@ -1744,8 +1710,7 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                 fileCount,
                 githubUrl,
                 lastSync,
-                syncing: this._isSyncingBrain || _autoSyncRunning,
-                ghSignedIn
+                syncing: this._isSyncingBrain || _autoSyncRunning
             }
         });
     }
@@ -2205,11 +2170,11 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
         const repoLabel = currentRepo ? currentRepo.split('/').pop() : '없음';
         
         const items: any[] = [
-            { label: `📂 내 지식 목록 (${fileCount}개)`, description: '저장된 지식 파일을 클릭해서 열어보기', action: 'listFiles' },
-            { label: `☁️ GitHub에 백업`, description: `${repoLabel} — 지식을 클라우드와 양방향 동기화`, action: 'githubSync' },
-            { label: '🔗 백업 저장소 주소 변경', description: 'GitHub 저장소 URL 바꾸기', action: 'changeGithub' },
-            { label: '📁 지식 폴더 위치 변경', description: `현재: ${brainDir}`, action: 'changeFolder' },
-            { label: '🌐 지식 네트워크 보기', description: '내 지식들의 연결 관계를 시각화', action: 'viewGraph' },
+            { label: `📂 내 지식 ${fileCount}개`, description: '클릭해서 파일 열기', action: 'listFiles' },
+            { label: `☁️ 지금 백업`, description: repoLabel, action: 'githubSync' },
+            { label: '🔗 GitHub 주소', description: '바꾸기', action: 'changeGithub' },
+            { label: '📁 폴더 위치', description: '바꾸기', action: 'changeFolder' },
+            { label: '🌐 네트워크 보기', description: '지식 연결 그래프', action: 'viewGraph' },
         ];
 
         const pick = await vscode.window.showQuickPick(items, { placeHolder: '🧠 내 지식 관리' });
@@ -2399,11 +2364,8 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
             gitExecSafe(['remote', 'remove', 'origin'], brainDir);
             gitExec(['remote', 'add', 'origin', cleanRepo], brainDir);
 
-            // 🔐 GitHub HTTPS URL이면 VS Code 인증 세션이 이미 있는지 살짝 확인 (다이얼로그 없이!)
-            // 이미 로그인돼 있으면 토큰 사용, 없으면 그냥 진행 (시스템 git credential helper에 맡김)
-            // 인증 실패는 push 단계에서 잡고, 그때 비로소 사용자에게 GitHub 로그인을 제안.
-            const isGithub = isGitHubHttpsUrl(cleanRepo);
-            let token: string | null = isGithub ? await getGitHubAuthToken(false) : null;
+            // 인증은 시스템 git에 맡깁니다 (osxkeychain / gh CLI / SSH 키 등).
+            // VS Code OAuth 강제 호출은 더 헷갈리게 만들었기 때문에 제거.
 
             // 1. 로컬 변경사항 커밋
             gitExecSafe(['add', '.'], brainDir);
@@ -2416,8 +2378,8 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                 gitExecSafe(['branch', '-M', remoteBranch], brainDir);
             }
 
-            // 3. fetch (원격 상태 파악) — 토큰 있으면 자동 주입
-            const fetchRes = gitRun(['fetch', 'origin'], brainDir, 30000, token);
+            // 3. fetch (원격 상태 파악)
+            const fetchRes = gitRun(['fetch', 'origin'], brainDir, 30000);
             const remoteHasBranch = gitExecSafe(['rev-parse', '--verify', `origin/${remoteBranch}`], brainDir) !== null;
 
             if (fetchRes.status !== 0 && !(fetchRes.stderr || '').toLowerCase().includes("couldn't find remote ref")) {
@@ -2449,7 +2411,7 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                         let activeChoice: string = choice;
                         for (let attempt = 0; attempt < 3 && !resolved; attempt++) {
                             if (activeChoice.startsWith('🤝')) {
-                                const mergeRes = gitRun(['pull', 'origin', remoteBranch, '--no-edit', '--allow-unrelated-histories'], brainDir, 30000, token);
+                                const mergeRes = gitRun(['pull', 'origin', remoteBranch, '--no-edit', '--allow-unrelated-histories'], brainDir, 30000);
                                 if (mergeRes.status === 0) {
                                     resolved = true;
                                     break;
@@ -2480,13 +2442,13 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                                 continue;
                             }
                             if (activeChoice.startsWith('💻') || activeChoice.startsWith('💪')) {
-                                const mres = gitRun(['pull', 'origin', remoteBranch, '--no-edit', '--allow-unrelated-histories', '-s', 'recursive', '-X', 'ours'], brainDir, 30000, token);
+                                const mres = gitRun(['pull', 'origin', remoteBranch, '--no-edit', '--allow-unrelated-histories', '-s', 'recursive', '-X', 'ours'], brainDir, 30000);
                                 if (mres.status !== 0) throw new Error(classifyGitError(mres.stderr).message);
                                 resolved = true;
                                 break;
                             }
                             // ☁️ GitHub 내용으로 덮어쓰기
-                            const fres = gitRun(['fetch', 'origin', remoteBranch], brainDir, 30000, token);
+                            const fres = gitRun(['fetch', 'origin', remoteBranch], brainDir, 30000);
                             if (fres.status !== 0) throw new Error(classifyGitError(fres.stderr).message);
                             gitExec(['reset', '--hard', `origin/${remoteBranch}`], brainDir, 15000);
                             resolved = true;
@@ -2499,29 +2461,8 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                 }
             }
 
-            // 5. push (force 없이) — 토큰 자동 주입
-            let pushRes = gitRun(['push', '-u', 'origin', remoteBranch], brainDir, 60000, token);
-
-            // 인증 실패 + GitHub URL + 아직 OAuth 토큰 없음 → 이제 비로소 로그인 제안
-            if (pushRes.status !== 0 && isGithub && !token) {
-                const errKind = classifyGitError(pushRes.stderr).kind;
-                if (errKind === 'auth') {
-                    const choice = await vscode.window.showInformationMessage(
-                        '🔐 GitHub 로그인이 필요해요.\n\nVS Code로 빠르게 로그인할까요? (브라우저에서 한 번 클릭)',
-                        '🔐 GitHub로 로그인',
-                        '⛔ 취소'
-                    );
-                    if (choice === '🔐 GitHub로 로그인') {
-                        token = await getGitHubAuthToken(true);
-                        if (token) {
-                            // 토큰 받았으니 fetch + push 재시도
-                            gitRun(['fetch', 'origin'], brainDir, 30000, token);
-                            pushRes = gitRun(['push', '-u', 'origin', remoteBranch], brainDir, 60000, token);
-                        }
-                    }
-                }
-            }
-
+            // 5. push — 시스템 git 자격증명 그대로 사용 (osxkeychain / gh CLI / SSH 키)
+            const pushRes = gitRun(['push', '-u', 'origin', remoteBranch], brainDir, 60000);
             if (pushRes.status !== 0) {
                 const err = classifyGitError(pushRes.stderr);
                 if (err.kind === 'rejected') {
@@ -2533,7 +2474,7 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                         '⚠️ 그래도 덮어쓰기'
                     );
                     if (force === '⚠️ 그래도 덮어쓰기') {
-                        const forceRes = gitRun(['push', '-u', 'origin', remoteBranch, '--force-with-lease'], brainDir, 60000, token);
+                        const forceRes = gitRun(['push', '-u', 'origin', remoteBranch, '--force-with-lease'], brainDir, 60000);
                         if (forceRes.status !== 0) {
                             throw new Error(classifyGitError(forceRes.stderr).message);
                         }
@@ -2555,11 +2496,7 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
         } catch (error: any) {
             const userMsg = error?.message || '알 수 없는 문제가 생겼어요';
             vscode.window.showErrorMessage(`동기화 실패: ${userMsg}`);
-            // 짧고 친절하게: 사용자가 시도해볼 만한 것 3가지만
-            this._view.webview.postMessage({
-                type: 'error',
-                value: `⚠️ ${userMsg}\n\n다시 시도해보세요. 그래도 안 되면:\n• 저장소 주소 확인 (예: https://github.com/내이름/저장소)\n• 인터넷 연결 확인\n• ☁️를 다시 클릭하면 GitHub 로그인 창이 다시 열려요`
-            });
+            this._view.webview.postMessage({ type: 'error', value: `⚠️ ${userMsg}` });
         } finally {
             this._isSyncingBrain = false;
             _autoSyncRunning = false;
@@ -3979,13 +3916,8 @@ function updateStatus(s){
     statGitText.textContent='GitHub 백업 설정';
   } else {
     statGit.classList.add('ok');
-    const lockIcon = s.ghSignedIn ? '🔓' : '🔒';
-    if(s.lastSync){
-      statGitText.textContent=lockIcon+' '+s.lastSync;
-    } else {
-      statGitText.textContent=lockIcon+' GitHub 연결됨';
-    }
-    statGit.title=(s.ghSignedIn?'GitHub 로그인됨':'GitHub 로그인 필요')+' · '+s.githubUrl+' (클릭하면 지금 동기화)';
+    statGitText.textContent = s.lastSync ? s.lastSync : 'GitHub 연결됨';
+    statGit.title = s.githubUrl+' (클릭하면 URL 확인/변경 + 지금 동기화)';
   }
 }
 vscode.postMessage({type:'requestStatus'});
