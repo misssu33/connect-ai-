@@ -1135,7 +1135,7 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean, forceGraphSrc: 
     #graph { position: absolute; inset: 0; width: 100vw; height: 100vh; z-index: 0; }
     canvas { cursor: grab; }
     canvas:active { cursor: grabbing; }
-    /* Search/filter bar — toggle with `/` key */
+    /* Search/filter bar — toggle with the slash key */
     #search-bar { position: absolute; top: 64px; left: 24px; z-index: 12;
       background: rgba(20,21,28,.92); border: 1px solid rgba(93,224,230,.32);
       border-radius: 10px; padding: 6px 10px;
@@ -1473,7 +1473,7 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean, forceGraphSrc: 
       else if (stickyNode) unpinNode();
     });
 
-    // ── Search/filter bar (`/` to open, ESC to close) ──
+    // -- Search/filter bar (slash to open, ESC to close) --
     const searchBar = document.getElementById('search-bar');
     const searchInput = document.getElementById('search-input');
     const searchCount = document.getElementById('search-count');
