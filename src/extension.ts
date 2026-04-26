@@ -2170,14 +2170,14 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
         const repoLabel = currentRepo ? currentRepo.split('/').pop() : '없음';
         
         const items: any[] = [
-            { label: `📂 내 지식 ${fileCount}개`, description: '클릭해서 파일 열기', action: 'listFiles' },
-            { label: `☁️ 지금 백업`, description: repoLabel, action: 'githubSync' },
-            { label: '🔗 GitHub 주소', description: '바꾸기', action: 'changeGithub' },
-            { label: '📁 폴더 위치', description: '바꾸기', action: 'changeFolder' },
+            { label: '☁️ 온라인 지식 공간', description: currentRepo ? `GitHub: ${repoLabel}` : 'GitHub 주소 설정', action: 'changeGithub' },
+            { label: '📁 로컬 지식 공간', description: brainDir ? `폴더: ${path.basename(brainDir)} (${fileCount}개 파일)` : '폴더 위치 설정', action: 'changeFolder' },
+            { label: '🔄 지금 백업', description: '온라인과 로컬 동기화', action: 'githubSync' },
             { label: '🌐 네트워크 보기', description: '지식 연결 그래프', action: 'viewGraph' },
+            { label: '🗑️ 삭제', description: 'GitHub 연결 또는 로컬 폴더 분리', action: 'cleanup' },
         ];
 
-        const pick = await vscode.window.showQuickPick(items, { placeHolder: '🧠 내 지식 관리' });
+        const pick = await vscode.window.showQuickPick(items, { placeHolder: '🧠 지식 공간 관리' });
         if (!pick) return;
 
         switch (pick.action) {
@@ -2264,13 +2264,13 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
             case 'changeGithub': {
                 const existing = vscode.workspace.getConfiguration('connectAiLab').get<string>('secondBrainRepo', '');
                 const inputUrl = await vscode.window.showInputBox({
-                    prompt: '🧠 GitHub 저장소 주소를 입력하세요 (Enter로 저장)',
+                    prompt: '☁️ 온라인 지식 공간 — GitHub 주소 (Enter로 저장)',
                     placeHolder: '예: https://github.com/사용자명/저장소이름',
                     value: existing,
                     ignoreFocusOut: true,
                     validateInput: (val) => {
                         const v = (val || '').trim();
-                        if (!v) return null; // 빈 값은 OK (취소 의도일 수 있음)
+                        if (!v) return null;
                         if (validateGitRemoteUrl(v)) return null;
                         return '⚠️ 형식: https://github.com/사용자/저장소  또는  git@github.com:사용자/저장소.git';
                     }
@@ -2278,9 +2278,53 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                 if (inputUrl !== undefined && inputUrl.trim()) {
                     const cleaned = validateGitRemoteUrl(inputUrl) || inputUrl.trim();
                     await vscode.workspace.getConfiguration('connectAiLab').update('secondBrainRepo', cleaned, vscode.ConfigurationTarget.Global);
-                    // 저장 직후 다시 읽어와서 정말 저장됐는지 확인 (사용자에게 보여주기)
                     const saved = vscode.workspace.getConfiguration('connectAiLab').get<string>('secondBrainRepo', '');
-                    vscode.window.showInformationMessage(`✅ GitHub 주소 저장됨: ${saved}\n🧠 메뉴 → 'GitHub에 백업'을 눌러 동기화하세요.`);
+                    vscode.window.showInformationMessage(`✅ 온라인 지식 공간 저장됨: ${saved}`);
+                    this._sendStatusUpdate();
+                }
+                break;
+            }
+            case 'cleanup': {
+                const cfg = vscode.workspace.getConfiguration('connectAiLab');
+                const hasGit = !!(cfg.get<string>('secondBrainRepo', '') || '');
+                const hasFolder = _isBrainDirExplicitlySet();
+
+                const items: any[] = [];
+                if (hasGit) items.push({ label: '☁️ 온라인 지식 공간 연결만 끊기', description: '파일은 그대로, GitHub 주소만 제거', kind: 'github' });
+                if (hasFolder) items.push({ label: '📁 로컬 지식 공간 연결만 분리', description: '파일은 디스크에 그대로, 익스텐션에서만 분리', kind: 'folder' });
+                if (items.length === 0) {
+                    vscode.window.showInformationMessage('지울 연결이 없어요. 이미 깨끗합니다 ✨');
+                    break;
+                }
+                items.push({ label: '⛔ 취소', kind: 'cancel' });
+
+                const pick2 = await vscode.window.showQuickPick(items, { placeHolder: '🗑️ 무엇을 끊을까요?' });
+                if (!pick2 || pick2.kind === 'cancel') break;
+
+                if (pick2.kind === 'github') {
+                    const confirm = await vscode.window.showWarningMessage(
+                        '☁️ 온라인 지식 공간 연결을 끊을까요?\n\n• GitHub 저장소 주소만 제거됩니다\n• 로컬 파일과 GitHub 저장소 자체는 그대로 남아요',
+                        { modal: true },
+                        '☁️ 끊기',
+                        '⛔ 취소'
+                    );
+                    if (confirm === '☁️ 끊기') {
+                        await cfg.update('secondBrainRepo', '', vscode.ConfigurationTarget.Global);
+                        vscode.window.showInformationMessage('☁️ 온라인 지식 공간 연결 해제됨.');
+                        this._sendStatusUpdate();
+                    }
+                } else if (pick2.kind === 'folder') {
+                    const confirm = await vscode.window.showWarningMessage(
+                        '📁 로컬 지식 공간 연결을 분리할까요?\n\n• 익스텐션이 더 이상 이 폴더를 참조하지 않습니다\n• 디스크의 파일은 그대로 남아요 (수동 삭제 안 함)',
+                        { modal: true },
+                        '📁 분리',
+                        '⛔ 취소'
+                    );
+                    if (confirm === '📁 분리') {
+                        await cfg.update('localBrainPath', '', vscode.ConfigurationTarget.Global);
+                        vscode.window.showInformationMessage('📁 로컬 지식 공간 연결 분리됨.');
+                        this._sendStatusUpdate();
+                    }
                 }
                 break;
             }
