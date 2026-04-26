@@ -1151,6 +1151,18 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean, forceGraphSrc: 
     #search-input::placeholder { color: #5a5d68; }
     #search-count { color: #5DE0E6; font-size: 11px; font-family: 'SF Mono', monospace; white-space: nowrap; }
     #search-count.zero { color: #FFB266; }
+    /* Legend folder chips + toggles */
+    #legend .folders { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.06); display: flex; flex-direction: column; gap: 3px; max-height: 180px; overflow-y: auto; }
+    #legend .folder-row { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: #9094a0; }
+    #legend .folder-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    #legend .folder-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #legend .folder-count { color: #5a5d68; font-family: 'SF Mono', monospace; font-size: 9px; }
+    #legend .toggle-row { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.06); display: flex; align-items: center; gap: 8px; font-size: 11px; color: #9094a0; cursor: pointer; user-select: none; }
+    #legend .toggle-row:hover { color: #d8d9de; }
+    #legend .toggle-row .switch { width: 22px; height: 12px; border-radius: 7px; background: #2a2a30; position: relative; transition: background .2s; flex-shrink: 0; }
+    #legend .toggle-row .switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 8px; height: 8px; border-radius: 50%; background: #888; transition: left .2s, background .2s; }
+    #legend .toggle-row.on .switch { background: rgba(93,224,230,.4); }
+    #legend .toggle-row.on .switch::after { left: 12px; background: #5DE0E6; }
     /* Thinking Mode */
     #thinking-overlay { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 15; background: rgba(20,21,28,.92); border: 1px solid rgba(93,224,230,.38); border-radius: 14px; padding: 14px 22px; font-size: 13px; color: #e0e2e8; backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); box-shadow: 0 12px 48px rgba(93,224,230,.18), 0 4px 16px rgba(0,0,0,.5); display: none; min-width: 340px; max-width: 600px; }
     #thinking-overlay.active { display: block; animation: slideUp .45s cubic-bezier(.16,1,.3,1); }
@@ -1183,6 +1195,8 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean, forceGraphSrc: 
     <div class="row synapse" style="margin-top:6px"><div class="swatch" style="background:#5DE0E6"></div><span>🧠 검색 중</span></div>
     <div class="row"><div class="swatch" style="background:#FFB266"></div><span>이미 사용함</span></div>
     <div class="row" style="margin-top:8px;font-size:10px;color:#5a5d68;line-height:1.55"><span>💡 클릭 → 인접만 강조<br>&nbsp;&nbsp;&nbsp;&nbsp;더블클릭 → 파일 열기<br>&nbsp;&nbsp;&nbsp;&nbsp;빈 곳 클릭 → 해제<br>&nbsp;&nbsp;&nbsp;&nbsp;빈 곳 더블클릭 → 전체 줌<br>&nbsp;&nbsp;&nbsp;&nbsp;<kbd style="background:#1a1a1f;padding:1px 5px;border-radius:3px;border:1px solid #2a2a30;font-family:SF Mono,monospace;font-size:9px">/</kbd> → 검색</span></div>
+    <div class="folders" id="folders-list"></div>
+    <div class="toggle-row" id="toggle-orphans" title="고립 노드 숨기기"><div class="switch"></div><span>👻 고립 노드 숨기기</span></div>
   </div>
   <div id="empty">
     <div class="big">📂 아직 지식이 없어요</div>
@@ -1220,6 +1234,39 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean, forceGraphSrc: 
 
     document.getElementById('stats').textContent =
       data.nodes.length + ' 지식 · ' + data.links.length + ' 연결 · ' + folders.length + ' 폴더';
+
+    // ── Folder chip list in legend (informational; folder→color mapping) ──
+    (() => {
+      const el = document.getElementById('folders-list');
+      if (!el) return;
+      const counts = {};
+      data.nodes.forEach(n => { counts[n.folder] = (counts[n.folder] || 0) + 1; });
+      folders.forEach(f => {
+        const row = document.createElement('div');
+        row.className = 'folder-row';
+        const dot = document.createElement('div');
+        dot.className = 'folder-dot';
+        dot.style.background = folderColor[f] || '#888';
+        const name = document.createElement('div');
+        name.className = 'folder-name';
+        name.textContent = f || '/';
+        const count = document.createElement('div');
+        count.className = 'folder-count';
+        count.textContent = counts[f] || 0;
+        row.appendChild(dot); row.appendChild(name); row.appendChild(count);
+        el.appendChild(row);
+      });
+    })();
+
+    // ── Orphan-hide toggle ──
+    let hideOrphans = false;
+    const orphanToggleEl = document.getElementById('toggle-orphans');
+    orphanToggleEl?.addEventListener('click', () => {
+      hideOrphans = !hideOrphans;
+      orphanToggleEl.classList.toggle('on', hideOrphans);
+      // Trigger a layout/render refresh
+      Graph.nodeVisibility(Graph.nodeVisibility());
+    });
 
     let hoverNode = null;
     let highlightNodes = new Set();
@@ -1348,6 +1395,7 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean, forceGraphSrc: 
         if (thinkingActive.has(sId) || thinkingActive.has(tId)) return SYNAPSE;
         return EDGE_COLOR[l.type] || '#7DA8E6';
       })
+      .nodeVisibility(n => !(hideOrphans && n.connections === 0))
       .d3VelocityDecay(0.25)
       .warmupTicks(120)
       .cooldownTicks(1200)
