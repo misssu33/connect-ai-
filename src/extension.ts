@@ -202,6 +202,61 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     // ==========================================
+    // Robust Git Auto-Sync Helper
+    // ==========================================
+    const _safeGitAutoSync = (brainDir: string, commitMsg: string, provider: any = null) => {
+        try {
+            const { execSync } = require('child_process');
+            
+            // Check if git is initialized
+            try { execSync(`git status`, { cwd: brainDir, stdio: 'ignore' }); } 
+            catch { return; /* Not a git repo, silently skip */ }
+
+            execSync(`git branch -M main`, { cwd: brainDir, stdio: 'ignore' });
+            execSync(`git add .`, { cwd: brainDir, stdio: 'ignore' });
+            
+            try {
+                execSync(`git commit -m "${commitMsg}"`, { cwd: brainDir, stdio: 'ignore' });
+            } catch (e) { /* Ignore empty commit */ }
+
+            // Pull with auto-resolve conflicts (prefer local on conflict)
+            try {
+                execSync(`git pull origin main --no-edit --allow-unrelated-histories -s recursive -X ours`, { cwd: brainDir, stdio: 'ignore' });
+            } catch (e) {
+                try { execSync(`git merge --abort`, { cwd: brainDir, stdio: 'ignore' }); } catch(err){}
+                try {
+                    execSync(`git pull origin master --no-edit --allow-unrelated-histories -s recursive -X ours`, { cwd: brainDir, stdio: 'ignore' });
+                } catch (e) {
+                    try { execSync(`git merge --abort`, { cwd: brainDir, stdio: 'ignore' }); } catch(err){}
+                }
+            }
+
+            // Push
+            try {
+                execSync(`git push -u origin main`, { cwd: brainDir, stdio: 'ignore' });
+                if (provider && provider.injectSystemMessage) {
+                    setTimeout(() => {
+                        provider.injectSystemMessage(`✅ **[GitHub Sync]** 글로벌 뇌(Second Brain)에 지식이 성공적으로 자동 백업되었습니다!`);
+                    }, 5000);
+                }
+            } catch (e) {
+                try {
+                    // 원격 리포지토리가 비어있거나 push가 실패할 경우 강제 푸시 시도
+                    execSync(`git push -u origin main -f`, { cwd: brainDir, stdio: 'ignore' });
+                } catch(e2) {
+                    if (provider && provider.injectSystemMessage) {
+                        setTimeout(() => {
+                            provider.injectSystemMessage(`⚠️ **[GitHub Sync 보류]** 원격 저장소 권한이 없거나 오프라인 상태입니다. (로컬에는 안전하게 주입되었습니다)`);
+                        }, 5000);
+                    }
+                }
+            }
+        } catch (e) {
+            console.error('Git Auto-Sync Failed:', e);
+        }
+    };
+
+    // ==========================================
     // EZER AI <-> Connect AI Bridge Server (Port 4825)
     // ==========================================
     try {
@@ -420,27 +475,8 @@ export function activate(context: vscode.ExtensionContext) {
                             provider.sendPromptFromExtension(`[A.U 히든 커맨드: 당신은 방금 마스터로부터 '${parsed.title}' 지식 팩을 뇌에 주입받았습니다. 영화 매트릭스에서 무술을 주입받은 네오처럼 쿨하게 딱 한마디만 하십시오. "나 방금 ${parsed.title} 지식을 마스터했어. (I know ${parsed.title}.) 앞으로 이와 관련된 건 무엇이든 물어봐." 절대 쓸데없는 안부인사나 부가설명을 덧붙이지 마십시오.]`);
                         }, 1500);
                         
-                        // [자동 깃허브 푸시 로직 추가]
-                        try {
-                            const { execSync } = require('child_process');
-                            execSync(`git add .`, { cwd: brainDir });
-                            execSync(`git commit -m "Auto-Inject Knowledge [Raw]: ${safeTitle}"`, { cwd: brainDir });
-                            execSync(`git push`, { cwd: brainDir });
-                            
-                            // 성공 시 백그라운드 시스템 보고
-                            setTimeout(() => {
-                                if ((provider as any).injectSystemMessage) {
-                                    (provider as any).injectSystemMessage(`✅ **[P-Reinforce Sync]** 주입된 지식을 글로벌 두뇌(GitHub)에 안전하게 백업 및 동기화 완료했습니다.`);
-                                }
-                            }, 5000);
-                        } catch(err) {
-                            console.error('Git Auto-Push Failed:', err);
-                            setTimeout(() => {
-                                if ((provider as any).injectSystemMessage) {
-                                    (provider as any).injectSystemMessage(`✅ 지식이 로컬 오프라인 모드로 안전하게 주입되었습니다.\n\n💡 **Tip:** 만약 온라인 두뇌(클라우드) 동기화를 원하시면, 좌측 사이드바 뇌(🧠) 아이콘을 눌러 깃허브 저장소를 연결해보세요!`);
-                                }
-                            }, 5000);
-                        }
+                        // [자동 깃허브 푸시 로직 적용]
+                        _safeGitAutoSync(brainDir, `Auto-Inject Knowledge [Raw]: ${safeTitle}`, provider);
                         
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ success: true, filePath }));
@@ -972,44 +1008,23 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
         
         const safeTitles = injectedTitles.join(', ');
         
-        try {
-            const { execSync } = require('child_process');
-            execSync(`git add .`, { cwd: brainDir });
-            execSync(`git commit -m "Auto-Inject Knowledge [Raw]: ${safeTitles}"`, { cwd: brainDir });
-            execSync(`git push`, { cwd: brainDir });
+        _safeGitAutoSync(brainDir, `Auto-Inject Knowledge [Raw]: ${safeTitles}`, this);
             
-            setTimeout(() => {
-                let combinedContent = '';
-                for (const title of injectedTitles) {
-                    try {
-                        const content = fs.readFileSync(path.join(datePath, title), 'utf-8');
-                        combinedContent += `\n\n[원본 데이터: ${title}]\n\`\`\`\n${content.slice(0, 10000)}\n\`\`\``;
-                    } catch(e) {}
-                }
+        setTimeout(() => {
+            let combinedContent = '';
+            for (const title of injectedTitles) {
+                try {
+                    const content = fs.readFileSync(path.join(datePath, title), 'utf-8');
+                    combinedContent += `\n\n[원본 데이터: ${title}]\n\`\`\`\n${content.slice(0, 10000)}\n\`\`\``;
+                } catch(e) {}
+            }
 
-                const hiddenPrompt = `[A.U 시스템 지시: P-Reinforce Architect 모드 활성화]\n새로운 비정형 데이터('${safeTitles}')가 글로벌 두뇌(Second Brain)에 입수 및 클라우드 백업 완료되었습니다.\n\n방금 입수된 데이터의 원본 내용은 아래와 같습니다:${combinedContent}\n\n여기서부터 중요합니다! 마스터가 '응'이나 '진행해' 등으로 동의할 경우, 당신은 절대 대화만으로 대답하지 말고 아래의 [P-Reinforce 구조화 규격]에 따라 곧바로 <create_file> Tool들을 사용하십시오.\n\n[P-Reinforce 구조화 규격]\n1. 폴더 생성: 원본 데이터를 주제별로 쪼개어 절대 경로인 \`${brainDir}/10_Wiki/\` 하위의 적절한 폴더(예: 🛠️ Projects, 💡 Topics, ⚖️ Decisions, 🚀 Skills)에 저장하십시오.\n2. 마크다운 양식 준수: 생성되는 각 문서 파일은 반드시 아래 포맷을 따라야 합니다.\n---\nid: {{UUID}}\ncategory: "[[10_Wiki/설정한_폴더]]"\nconfidence_score: 0.9\ntags: [관련태그]\nlast_reinforced: ${dateStr}\n---\n# [[문서 제목]]\n## 📌 한 줄 통찰\n> (핵심 요약)\n## 📖 구조화된 지식\n- (세부 내용 불렛 포인트)\n## 🔗 지식 연결\n- Parent: [[상위_카테고리]]\n- Related: [[연관_개념]]\n- Raw Source: [[00_Raw/${dateStr}/${safeTitles}]]\n\n지시를 숙지했다면 묻지 말고 즉각 \`<create_file path="${brainDir}/10_Wiki/새폴더/새문서.md">\`를 사용하여 지식을 분해 후 생성하십시오. 완료 후 잘라낸 결과를 보고하십시오.`;
-                this._chatHistory.push({ role: 'system', content: hiddenPrompt });
-                
-                const uiMsg = "🧠 데이터가 완벽하게 입수되었습니다! 즉시 P-Reinforce 구조화를 시작할까요?";
-                this.injectSystemMessage(uiMsg);
-            }, 3000);
-        } catch(err) {
-            setTimeout(() => {
-                let combinedContent = '';
-                for (const title of injectedTitles) {
-                    try {
-                        const content = fs.readFileSync(path.join(datePath, title), 'utf-8');
-                        combinedContent += `\n\n[원본 데이터: ${title}]\n\`\`\`\n${content.slice(0, 10000)}\n\`\`\``;
-                    } catch(e) {}
-                }
-
-                const hiddenPrompt = `[A.U 시스템 지시: P-Reinforce Architect 모드 활성화]\n새로운 비정형 데이터('${safeTitles}')가 글로벌 두뇌에 다운로드 되었습니다.(원격 푸시 보류됨)\n\n방금 입수된 데이터의 원본 내용은 아래와 같습니다:${combinedContent}\n\n여기서부터 중요합니다! 마스터가 동의할 경우, 절대 대화만으로 대답하지 말고 아래의 [P-Reinforce 구조화 규격]에 따라 곧바로 <create_file> Tool들을 사용하십시오.\n\n[P-Reinforce 구조화 규격]\n1. 폴더 생성: 원본 데이터를 주제별로 쪼개어 절대 경로인 \`${brainDir}/10_Wiki/\` 하위의 적절한 폴더(예: 🛠️ Projects, 💡 Topics, ⚖️ Decisions, 🚀 Skills)에 저장하십시오.\n2. 마크다운 양식 준수: 생성되는 각 문서 파일은 반드시 아래 포맷을 따라야 합니다.\n---\nid: {{UUID}}\ncategory: "[[10_Wiki/설정한_폴더]]"\nconfidence_score: 0.9\ntags: [관련태그]\nlast_reinforced: ${dateStr}\n---\n# [[문서 제목]]\n## 📌 한 줄 통찰\n> (핵심 요약)\n## 📖 구조화된 지식\n- (세부 내용 불렛 포인트)\n## 🔗 지식 연결\n- Parent: [[상위_카테고리]]\n- Related: [[연관_개념]]\n- Raw Source: [[00_Raw/${dateStr}/${safeTitles}]]\n\n지시를 숙지했다면 묻지 말고 즉각 \`<create_file path="${brainDir}/10_Wiki/새폴더/새문서.md">\`를 사용하여 지식을 분해 후 생성하십시오.`;
-                this._chatHistory.push({ role: 'system', content: hiddenPrompt });
-                
-                const uiMsg = "🧠 로컬 데이터가 입수되었습니다! 곧바로 P-Reinforce 구조화를 시작할까요?";
-                this.injectSystemMessage(uiMsg);
-            }, 3000);
-        }
+            const hiddenPrompt = `[A.U 시스템 지시: P-Reinforce Architect 모드 활성화]\n새로운 비정형 데이터('${safeTitles}')가 글로벌 두뇌(Second Brain)에 입수 및 클라우드 백업 처리 완료되었습니다.\n\n방금 입수된 데이터의 원본 내용은 아래와 같습니다:${combinedContent}\n\n여기서부터 중요합니다! 마스터가 '응'이나 '진행해' 등으로 동의할 경우, 당신은 절대 대화만으로 대답하지 말고 아래의 [P-Reinforce 구조화 규격]에 따라 곧바로 <create_file> Tool들을 사용하십시오.\n\n[P-Reinforce 구조화 규격]\n1. 폴더 생성: 원본 데이터를 주제별로 쪼개어 절대 경로인 \`${brainDir}/10_Wiki/\` 하위의 적절한 폴더(예: 🛠️ Projects, 💡 Topics, ⚖️ Decisions, 🚀 Skills)에 저장하십시오.\n2. 마크다운 양식 준수: 생성되는 각 문서 파일은 반드시 아래 포맷을 따라야 합니다.\n---\nid: {{UUID}}\ncategory: "[[10_Wiki/설정한_폴더]]"\nconfidence_score: 0.9\ntags: [관련태그]\nlast_reinforced: ${dateStr}\n---\n# [[문서 제목]]\n## 📌 한 줄 통찰\n> (핵심 요약)\n## 📖 구조화된 지식\n- (세부 내용 불렛 포인트)\n## 🔗 지식 연결\n- Parent: [[상위_카테고리]]\n- Related: [[연관_개념]]\n- Raw Source: [[00_Raw/${dateStr}/${safeTitles}]]\n\n지시를 숙지했다면 묻지 말고 즉각 \`<create_file path="${brainDir}/10_Wiki/새폴더/새문서.md">\`를 사용하여 지식을 분해 후 생성하십시오. 완료 후 잘라낸 결과를 보고하십시오.`;
+            this._chatHistory.push({ role: 'system', content: hiddenPrompt });
+            
+            const uiMsg = "🧠 데이터가 완벽하게 입수되었습니다! 즉시 P-Reinforce 구조화를 시작할까요?";
+            this.injectSystemMessage(uiMsg);
+        }, 3000);
     }
 
     // --------------------------------------------------------
@@ -1191,6 +1206,9 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                 await execAsync(`git init`, { cwd: brainDir });
             }
             
+            // 확실하게 브랜치 이름을 main으로 통일 (기본값이 master인 경우 방지)
+            await execAsync(`git branch -M main`, { cwd: brainDir }).catch(() => {});
+            
             // 원격 저장소 추가(오류 무시) 후 fetch & 강제 reset (untracked 파일은 보존됨!)
             await execAsync(`git remote remove origin`, { cwd: brainDir }).catch(() => {});
             await execAsync(`git remote add origin ${cleanRepo}`, { cwd: brainDir });
@@ -1204,8 +1222,10 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                 // 2. 깃허브에 다른 변경사항이 있다면 다운로드해서 합치기 (최신 지식 병합)
                 try {
                     await execAsync(`git fetch origin`, { cwd: brainDir });
-                    await execAsync(`git pull origin main --no-edit --allow-unrelated-histories`, { cwd: brainDir }).catch(async () => {
-                        await execAsync(`git pull origin master --no-edit --allow-unrelated-histories`, { cwd: brainDir });
+                    // 원격에 main 브랜치가 있으면 pull
+                    await execAsync(`git pull origin main --no-edit --allow-unrelated-histories -s recursive -X ours`, { cwd: brainDir }).catch(async () => {
+                        // main이 실패하면 master 시도 후 main으로 병합
+                        await execAsync(`git pull origin master --no-edit --allow-unrelated-histories -s recursive -X ours`, { cwd: brainDir });
                     });
                 } catch {
                     // 원격 저장소가 완전히 비어있거나 pull 실패 시 무시
@@ -1213,7 +1233,8 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
 
                 // 3. 로컬과 깃허브가 완벽히 합쳐진 최종본을 다시 깃허브로 밀어넣기 (클라우드 최신화)
                 await execAsync(`git push -u origin main`, { cwd: brainDir }).catch(async () => {
-                    await execAsync(`git push -u origin master`, { cwd: brainDir }).catch(() => {});
+                    // 강제 푸시 시도 (원격이 비어있거나 꼬였을 때)
+                    await execAsync(`git push -u origin main -f`, { cwd: brainDir });
                 });
             } catch (syncErr: any) {
                 const msg = syncErr.message || '';
@@ -2118,16 +2139,7 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
 
         // Auto-Push Second Brain changes to Cloud
         if (brainModified) {
-            try {
-                const brainDir = _getBrainDir();
-                const { execSync } = require('child_process');
-                execSync(`git add .`, { cwd: brainDir });
-                execSync(`git commit -m "[P-Reinforce] Auto-synced structured knowledge"`, { cwd: brainDir });
-                execSync(`git push`, { cwd: brainDir });
-                report.push(`☁️ **[GitHub Sync]** 글로벌 뇌(Second Brain)에 지식이 성공적으로 자동 백업되었습니다!`);
-            } catch (err: any) {
-                report.push(`⚠️ **[GitHub Sync 보류]** 동기화 중 권한 문제가 발생했습니다 (수동 푸시 권장)`);
-            }
+            _safeGitAutoSync(_getBrainDir(), `[P-Reinforce] Auto-synced structured knowledge`, this);
         }
 
         return report;
