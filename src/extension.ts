@@ -1344,8 +1344,8 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean, forceGraphSrc: 
           tooltip.style.display = 'block';
           const tagsHtml = (node.tags || []).slice(0, 5).map(t => '<span class="t-tag">#' + t + '</span>').join('');
           tooltip.innerHTML =
-            '<div class="t-name">' + node.name + '</div>' +
-            '<div class="t-meta">' + node.folder + ' · ' + node.connections + '개 연결</div>' +
+            '<div class="t-name">' + (node.name || '(이름 없음)') + '</div>' +
+            '<div class="t-meta">' + (node.folder || '/') + ' · ' + (node.connections || 0) + '개 연결</div>' +
             (tagsHtml ? '<div class="t-tags">' + tagsHtml + '</div>' : '');
         } else {
           tooltip.style.display = 'none';
@@ -1523,6 +1523,7 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean, forceGraphSrc: 
       nodesByBasename[k].push(n);
     });
     function findNodeForReadRequest(req) {
+      if (typeof req !== 'string' || !req) return null;
       // Try by exact id first
       const direct = data.nodes.find(n => n.id === req || n.id === req + '.md');
       if (direct) return direct;
@@ -1620,7 +1621,7 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean, forceGraphSrc: 
                     :            '#a0a0a8' + dimAlpha;
       // subtle text shadow for active/hub legibility
       if (isActive || isDone) { ctx.shadowBlur = 6; ctx.shadowColor = isActive ? SYNAPSE : TRAIL; }
-      ctx.fillText(node.name, node.x, node.y + r + 2);
+      ctx.fillText(node.name || '', node.x, node.y + r + 2);
       ctx.shadowBlur = 0;
 
       // ── 6. Usage-order index chip on cited nodes (1, 2, 3...) ──
@@ -1726,7 +1727,7 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean, forceGraphSrc: 
             recomputeAdjacent();
             // Camera nudge — gently center on the active node
             try { Graph.centerAt(node.x, node.y, 800); } catch(e){}
-            phaseBrain.querySelector('.text').textContent = '🧠 ' + node.name + ' 읽는 중...';
+            phaseBrain.querySelector('.text').textContent = '🧠 ' + (node.name || '(노트)') + ' 읽는 중...';
             // After 1.4s, mark as done (trail) and remove from active
             setTimeout(() => {
               thinkingActive.delete(node.id);
