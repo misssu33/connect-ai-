@@ -1047,41 +1047,58 @@ function buildKnowledgeGraph(brainDir: string): BrainGraph {
 }
 
 async function showBrainNetwork(_context: vscode.ExtensionContext) {
-    const assetsRoot = vscode.Uri.file(path.join(_context.extensionPath, 'assets'));
-    const panel = vscode.window.createWebviewPanel(
-        'brainTopology',
-        'Neural Construct (Brain)',
-        vscode.ViewColumn.One,
-        { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [assetsRoot] }
-    );
+    let panel: vscode.WebviewPanel | undefined;
+    try {
+        const assetsRoot = vscode.Uri.file(path.join(_context.extensionPath, 'assets'));
+        panel = vscode.window.createWebviewPanel(
+            'brainTopology',
+            'Neural Construct (Brain)',
+            vscode.ViewColumn.One,
+            { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [assetsRoot] }
+        );
 
-    const brainDir = _getBrainDir();
-    const graph = buildKnowledgeGraph(brainDir);
-    const isEmpty = graph.nodes.length === 0;
+        const brainDir = _getBrainDir();
+        const graph = buildKnowledgeGraph(brainDir);
+        const isEmpty = graph.nodes.length === 0;
 
-    // Handle messages from webview (e.g., open file requests)
-    panel.webview.onDidReceiveMessage(async (msg) => {
-        if (msg.type === 'openFile' && typeof msg.id === 'string') {
-            const safe = safeResolveInside(brainDir, msg.id);
-            if (safe && fs.existsSync(safe)) {
-                const doc = await vscode.workspace.openTextDocument(safe);
-                vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+        // Handle messages from webview (e.g., open file requests)
+        panel.webview.onDidReceiveMessage(async (msg) => {
+            if (msg.type === 'openFile' && typeof msg.id === 'string') {
+                const safe = safeResolveInside(brainDir, msg.id);
+                if (safe && fs.existsSync(safe)) {
+                    const doc = await vscode.workspace.openTextDocument(safe);
+                    vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+                }
             }
+        });
+
+        const graphJson = JSON.stringify({
+            nodes: graph.nodes.map(n => ({
+                id: n.id, name: n.name, folder: n.folder, tags: n.tags,
+                connections: n.incoming + n.outgoing
+            })),
+            links: graph.links
+        });
+
+        const forceGraphSrc = panel.webview.asWebviewUri(
+            vscode.Uri.file(path.join(_context.extensionPath, 'assets', 'force-graph.min.js'))
+        ).toString();
+        const html = _RENDER_GRAPH_HTML(graphJson, isEmpty, forceGraphSrc, panel.webview.cspSource);
+        // Defensive: if HTML somehow comes back falsy, surface that explicitly
+        // instead of letting the webview coerce it into the literal string "null".
+        if (typeof html !== 'string' || !html) {
+            throw new Error('_RENDER_GRAPH_HTML returned non-string: ' + typeof html);
         }
-    });
-
-    const graphJson = JSON.stringify({
-        nodes: graph.nodes.map(n => ({
-            id: n.id, name: n.name, folder: n.folder, tags: n.tags,
-            connections: n.incoming + n.outgoing
-        })),
-        links: graph.links
-    });
-
-    const forceGraphSrc = panel.webview.asWebviewUri(
-        vscode.Uri.file(path.join(_context.extensionPath, 'assets', 'force-graph.min.js'))
-    ).toString();
-    panel.webview.html = _RENDER_GRAPH_HTML(graphJson, isEmpty, forceGraphSrc, panel.webview.cspSource);
+        panel.webview.html = html;
+    } catch (err: any) {
+        const detail = err?.stack || err?.message || String(err);
+        console.error('showBrainNetwork failed:', detail);
+        vscode.window.showErrorMessage('지식 네트워크 열기 실패: ' + (err?.message || String(err)));
+        if (panel) {
+            const safe = String(detail).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'} as any)[c]);
+            panel.webview.html = '<!DOCTYPE html><html><body style="background:#131419;color:#e0e2e8;font-family:-apple-system;padding:40px;line-height:1.55"><h2 style="color:#FFB266;margin-top:0">⚠️ 지식 네트워크 로드 실패</h2><div style="color:#9094a0;font-size:13px;margin-bottom:14px">아래 에러 메시지를 그대로 알려주세요.</div><pre style="color:#e0e2e8;background:#1a1a1f;padding:14px;border-radius:8px;overflow:auto;font-size:12px">' + safe + '</pre></body></html>';
+        }
+    }
 }
 
 /** Returns the full graph webview HTML. Reused by showBrainNetwork + ThinkingPanel. */
