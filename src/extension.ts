@@ -2453,7 +2453,9 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                         let activeChoice: string = choice;
                         for (let attempt = 0; attempt < 3 && !resolved; attempt++) {
                             if (activeChoice.startsWith('🤝')) {
-                                const mergeRes = gitRun(['pull', 'origin', remoteBranch, '--no-edit', '--allow-unrelated-histories'], brainDir, 30000);
+                                // We already fetched at step 3 above — use git merge directly to avoid the
+                                // git 2.27+ "divergent branches" hint that `git pull` (without --rebase / --ff-only) emits.
+                                const mergeRes = gitRun(['merge', '--no-edit', '--allow-unrelated-histories', `origin/${remoteBranch}`], brainDir, 30000);
                                 if (mergeRes.status === 0) {
                                     resolved = true;
                                     break;
@@ -2484,7 +2486,8 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                                 continue;
                             }
                             if (activeChoice.startsWith('💻') || activeChoice.startsWith('💪')) {
-                                const mres = gitRun(['pull', 'origin', remoteBranch, '--no-edit', '--allow-unrelated-histories', '-s', 'recursive', '-X', 'ours'], brainDir, 30000);
+                                // git merge with -s recursive -X ours = "merge, but on conflicts prefer my (local) side"
+                                const mres = gitRun(['merge', '--no-edit', '--allow-unrelated-histories', '-s', 'recursive', '-X', 'ours', `origin/${remoteBranch}`], brainDir, 30000);
                                 if (mres.status !== 0) throw new Error(classifyGitError(mres.stderr).message);
                                 resolved = true;
                                 break;
