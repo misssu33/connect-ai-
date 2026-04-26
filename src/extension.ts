@@ -1217,40 +1217,65 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean): string {
       });
     }
 
+    // Compute node radius — give every node a comfortable minimum size so even
+    // unconnected ones are clearly visible (not 1px dots in space).
+    function nodeRadius(n) {
+      // Connected nodes scale with degree, isolated nodes still get min size 5
+      return Math.max(5, Math.min(18, 5 + Math.sqrt(n.connections + 1) * 2.2));
+    }
+
     const Graph = ForceGraph()(document.getElementById('graph'))
       .backgroundColor('#0a0a0a')
       .graphData(data)
       .nodeId('id')
-      .nodeVal(n => Math.max(2, n.connections * 1.4 + 1))
+      .nodeVal(n => nodeRadius(n) * 0.6)
       .nodeCanvasObject((node, ctx, globalScale) => {
-        const baseR = Math.sqrt(Math.max(2, node.connections * 1.4 + 1)) * 1.8;
+        const baseR = nodeRadius(node);
         const isHL = highlightNodes.size === 0 || highlightNodes.has(node.id);
         const color = folderColor[node.folder] || '#888';
-        const r = isHL ? baseR : baseR * 0.7;
+        const isIsolated = node.connections === 0;
+        const r = isHL ? baseR : baseR * 0.65;
 
+        // Soft outer glow for every node — makes the constellation feel alive
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, r + 3, 0, 2 * Math.PI);
+        const glow = ctx.createRadialGradient(node.x, node.y, r * 0.5, node.x, node.y, r + 3);
+        glow.addColorStop(0, color + (isHL ? 'aa' : '55'));
+        glow.addColorStop(1, color + '00');
+        ctx.fillStyle = glow;
+        ctx.fill();
+
+        // Solid core
         ctx.beginPath();
         ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
-        if (node.connections > 3 && isHL) {
-          ctx.shadowBlur = 12; ctx.shadowColor = color;
-        } else {
-          ctx.shadowBlur = 0;
+        if (node.connections > 2 && isHL) {
+          ctx.shadowBlur = 14; ctx.shadowColor = color;
         }
-        ctx.fillStyle = isHL ? color : 'rgba(60,60,60,0.6)';
-        ctx.fill();
+        if (isIsolated) {
+          // Outlined ring instead of solid — distinguishes orphan notes
+          ctx.fillStyle = '#0a0a0a';
+          ctx.fill();
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = isHL ? color : color + '80';
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = isHL ? color : color + '99';
+          ctx.fill();
+        }
         ctx.shadowBlur = 0;
 
-        const showLabel = (globalScale > 1.4 || node.connections > 2) && isHL;
-        if (showLabel) {
-          const fs = Math.max(2.5, Math.min(5, 11 / globalScale));
-          ctx.font = fs + 'px -apple-system, sans-serif';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'top';
-          ctx.fillStyle = node.connections > 2 ? '#e0e0e0' : '#777';
-          ctx.fillText(node.name, node.x, node.y + r + 2);
-        }
+        // Always show label, just scale font with zoom and connection importance
+        const fs = Math.max(3, Math.min(6, 11 / globalScale + node.connections * 0.15));
+        ctx.font = (node.connections > 2 ? '600 ' : '') + fs + 'px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        // Brighter for connected, dimmer for isolated, but always readable
+        const labelAlpha = isHL ? (node.connections > 2 ? 'ee' : 'aa') : '66';
+        ctx.fillStyle = (node.connections > 2 ? '#ffffff' : '#aaaaaa') + (isHL ? '' : '60');
+        ctx.fillText(node.name, node.x, node.y + r + 2);
       })
       .nodePointerAreaPaint((node, color, ctx) => {
-        const r = Math.sqrt(Math.max(2, node.connections * 1.4 + 1)) * 1.8 + 4;
+        const r = nodeRadius(node) + 6;
         ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
         ctx.fillStyle = color; ctx.fill();
       })
@@ -1263,9 +1288,9 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean): string {
       .linkDirectionalParticleWidth(1.5)
       .linkDirectionalParticleSpeed(0.006)
       .linkDirectionalParticleColor(l => EDGE_COLOR[l.type] || '#00ff66')
-      .d3VelocityDecay(0.12)
-      .warmupTicks(80)
-      .cooldownTicks(800)
+      .d3VelocityDecay(0.25)
+      .warmupTicks(120)
+      .cooldownTicks(1200)
       .onNodeHover(node => {
         hoverNode = node || null;
         applyHighlight(hoverNode);
@@ -1303,8 +1328,15 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean): string {
       }
     });
 
-    Graph.d3Force('charge').strength(-90);
-    Graph.d3Force('link').distance(l => l.type === 'tag' ? 90 : 50);
+    // Force tuning: scale repulsion DOWN for sparse graphs so isolated nodes
+    // don't fly off into space. Add a gentle center pull so orphans stay visible.
+    const sparseFactor = Math.max(0.4, Math.min(1, data.links.length / Math.max(1, data.nodes.length)));
+    Graph.d3Force('charge').strength(-40 - 30 * sparseFactor);    // -40 ~ -70 depending on density
+    Graph.d3Force('link').distance(l => l.type === 'tag' ? 70 : 38);
+    // Add center force so orphan nodes drift toward center instead of fleeing
+    if (typeof window.d3 !== 'undefined' && window.d3.forceCenter) {
+      Graph.d3Force('center', window.d3.forceCenter(0, 0).strength(0.05));
+    }
 
     // Tooltip follow mouse
     document.addEventListener('mousemove', (e) => {
@@ -1314,10 +1346,16 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean): string {
       }
     });
 
+    // Multi-stage zoom-to-fit: gives the layout time to settle, then frames it nicely.
+    // Padding scales with node count so dense graphs use more space and sparse ones tighten in.
+    const zoomPad = data.nodes.length < 10 ? 100 : data.nodes.length < 30 ? 70 : 40;
+    setTimeout(() => Graph.zoomToFit(800, zoomPad), 400);
     setTimeout(() => {
-      Graph.zoomToFit(1200, 60);
+      Graph.zoomToFit(1200, zoomPad);
       document.getElementById('titleSpan').innerText = '지식 네트워크 · LIVE';
-    }, 600);
+    }, 1500);
+    // Final settle once cooldown completes
+    setTimeout(() => Graph.zoomToFit(1200, zoomPad), 3000);
 
     window.addEventListener('resize', () => {
       Graph.width(window.innerWidth).height(window.innerHeight);
@@ -1354,20 +1392,21 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean): string {
     const thinkingDone = new Set();     // node ids already cited as source
     let thinkPulseTime = 0;
 
-    // Override node renderer to add thinking effects (re-call .nodeCanvasObject with new fn)
+    // Override node renderer to add thinking effects, layered on top of the base style.
     Graph.nodeCanvasObject((node, ctx, globalScale) => {
-      const baseR = Math.sqrt(Math.max(2, node.connections * 1.4 + 1)) * 1.8;
+      const baseR = nodeRadius(node);
       const isHL = highlightNodes.size === 0 || highlightNodes.has(node.id);
       const isThinkActive = thinkingActive.has(node.id);
       const isThinkDone = thinkingDone.has(node.id);
+      const isIsolated = node.connections === 0;
       const color = folderColor[node.folder] || '#888';
 
-      // Active thinking node: pulsing halo + bigger
+      // Active thinking node: pulsing halo on top of normal node
       if (isThinkActive) {
         const pulse = 0.5 + 0.5 * Math.sin(thinkPulseTime * 0.08);
-        const haloR = baseR * (2.2 + pulse * 0.6);
+        const haloR = baseR * (2.4 + pulse * 0.7);
         const grad = ctx.createRadialGradient(node.x, node.y, baseR, node.x, node.y, haloR);
-        grad.addColorStop(0, 'rgba(0,255,102,0.6)');
+        grad.addColorStop(0, 'rgba(0,255,102,0.7)');
         grad.addColorStop(1, 'rgba(0,255,102,0)');
         ctx.beginPath();
         ctx.arc(node.x, node.y, haloR, 0, 2 * Math.PI);
@@ -1375,34 +1414,55 @@ function _RENDER_GRAPH_HTML(graphJson: string, isEmpty: boolean): string {
         ctx.fill();
       }
 
-      const r = isHL ? baseR * (isThinkActive ? 1.6 : 1) : baseR * 0.7;
+      // Soft outer glow (always visible, gives constellation feel)
+      const r = isHL ? baseR * (isThinkActive ? 1.6 : 1) : baseR * 0.65;
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, r + 3, 0, 2 * Math.PI);
+      const ambientColor = isThinkActive ? '#00ff66' : color;
+      const ambient = ctx.createRadialGradient(node.x, node.y, r * 0.5, node.x, node.y, r + 3);
+      ambient.addColorStop(0, ambientColor + (isHL || isThinkActive ? 'aa' : '55'));
+      ambient.addColorStop(1, ambientColor + '00');
+      ctx.fillStyle = ambient;
+      ctx.fill();
+
+      // Solid core
       ctx.beginPath();
       ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
       if (isThinkActive) {
         ctx.shadowBlur = 22; ctx.shadowColor = '#00ff66';
         ctx.fillStyle = '#00ff66';
+        ctx.fill();
       } else if (isThinkDone) {
         ctx.shadowBlur = 14; ctx.shadowColor = color;
         ctx.fillStyle = color;
-      } else if (node.connections > 3 && isHL) {
+        ctx.fill();
+      } else if (isIsolated) {
+        // Outlined ring for orphans
+        ctx.fillStyle = '#0a0a0a';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = isHL ? color : color + '80';
+        ctx.stroke();
+      } else if (node.connections > 2 && isHL) {
         ctx.shadowBlur = 12; ctx.shadowColor = color;
         ctx.fillStyle = color;
+        ctx.fill();
       } else {
-        ctx.shadowBlur = 0;
-        ctx.fillStyle = isHL ? color : 'rgba(60,60,60,0.6)';
+        ctx.fillStyle = isHL ? color : color + '99';
+        ctx.fill();
       }
-      ctx.fill();
       ctx.shadowBlur = 0;
 
-      const showLabel = isThinkActive || isThinkDone || (globalScale > 1.4 || node.connections > 2) && isHL;
-      if (showLabel) {
-        const fs = Math.max(2.5, Math.min(6, 12 / globalScale));
-        ctx.font = (isThinkActive ? 'bold ' : '') + fs + 'px -apple-system, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        ctx.fillStyle = isThinkActive ? '#00ff66' : (node.connections > 2 ? '#e0e0e0' : '#777');
-        ctx.fillText(node.name, node.x, node.y + r + 2);
-      }
+      // Always show labels, scaled by zoom + importance
+      const fs = Math.max(3, Math.min(7, 12 / globalScale + node.connections * 0.15));
+      const isImportant = isThinkActive || isThinkDone || node.connections > 2;
+      ctx.font = (isImportant ? '600 ' : '') + fs + 'px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = isThinkActive
+        ? '#00ff66'
+        : isImportant ? '#ffffff' + (isHL ? '' : '80') : '#aaaaaa' + (isHL ? '' : '60');
+      ctx.fillText(node.name, node.x, node.y + r + 2);
     });
 
     // Pulse animation tick
@@ -2339,17 +2399,11 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
             gitExecSafe(['remote', 'remove', 'origin'], brainDir);
             gitExec(['remote', 'add', 'origin', cleanRepo], brainDir);
 
-            // 🔐 GitHub HTTPS URL이면 VS Code 인증으로 토큰 획득 (사용자가 토큰 직접 만들 필요 없음)
-            // OAuth 동의 다이얼로그 → 브라우저 → "Authorize" 클릭 → 토큰 자동 주입
+            // 🔐 GitHub HTTPS URL이면 VS Code 인증 세션이 이미 있는지 살짝 확인 (다이얼로그 없이!)
+            // 이미 로그인돼 있으면 토큰 사용, 없으면 그냥 진행 (시스템 git credential helper에 맡김)
+            // 인증 실패는 push 단계에서 잡고, 그때 비로소 사용자에게 GitHub 로그인을 제안.
             const isGithub = isGitHubHttpsUrl(cleanRepo);
-            let token: string | null = null;
-            if (isGithub) {
-                this._view.webview.postMessage({ type: 'response', value: '🔐 GitHub 로그인 확인 중... (필요 시 브라우저가 열립니다)' });
-                token = await getGitHubAuthToken(true);
-                if (!token) {
-                    throw new Error('GitHub 로그인이 필요해요. 다시 시도하면 인증 창이 열립니다.');
-                }
-            }
+            let token: string | null = isGithub ? await getGitHubAuthToken(false) : null;
 
             // 1. 로컬 변경사항 커밋
             gitExecSafe(['add', '.'], brainDir);
@@ -2446,7 +2500,28 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
             }
 
             // 5. push (force 없이) — 토큰 자동 주입
-            const pushRes = gitRun(['push', '-u', 'origin', remoteBranch], brainDir, 60000, token);
+            let pushRes = gitRun(['push', '-u', 'origin', remoteBranch], brainDir, 60000, token);
+
+            // 인증 실패 + GitHub URL + 아직 OAuth 토큰 없음 → 이제 비로소 로그인 제안
+            if (pushRes.status !== 0 && isGithub && !token) {
+                const errKind = classifyGitError(pushRes.stderr).kind;
+                if (errKind === 'auth') {
+                    const choice = await vscode.window.showInformationMessage(
+                        '🔐 GitHub 로그인이 필요해요.\n\nVS Code로 빠르게 로그인할까요? (브라우저에서 한 번 클릭)',
+                        '🔐 GitHub로 로그인',
+                        '⛔ 취소'
+                    );
+                    if (choice === '🔐 GitHub로 로그인') {
+                        token = await getGitHubAuthToken(true);
+                        if (token) {
+                            // 토큰 받았으니 fetch + push 재시도
+                            gitRun(['fetch', 'origin'], brainDir, 30000, token);
+                            pushRes = gitRun(['push', '-u', 'origin', remoteBranch], brainDir, 60000, token);
+                        }
+                    }
+                }
+            }
+
             if (pushRes.status !== 0) {
                 const err = classifyGitError(pushRes.stderr);
                 if (err.kind === 'rejected') {
@@ -2480,7 +2555,11 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
         } catch (error: any) {
             const userMsg = error?.message || '알 수 없는 문제가 생겼어요';
             vscode.window.showErrorMessage(`동기화 실패: ${userMsg}`);
-            this._view.webview.postMessage({ type: 'error', value: `⚠️ 동기화 실패: ${userMsg}\n\n💡 **이런 경우가 많아요:**\n• Private 저장소인데 GitHub 토큰을 안 만들었어요\n• 저장소 주소가 틀렸어요 (예: \`https://github.com/내이름/저장소\`)\n• 인터넷이 끊겼어요\n• 컴퓨터에 git이 안 깔려있어요\n\n👉 토큰 만들기: GitHub → 우측 상단 프로필 → Settings → Developer settings → Personal access tokens → 토큰 생성 (repo 권한 체크)` });
+            // 짧고 친절하게: 사용자가 시도해볼 만한 것 3가지만
+            this._view.webview.postMessage({
+                type: 'error',
+                value: `⚠️ ${userMsg}\n\n다시 시도해보세요. 그래도 안 되면:\n• 저장소 주소 확인 (예: https://github.com/내이름/저장소)\n• 인터넷 연결 확인\n• ☁️를 다시 클릭하면 GitHub 로그인 창이 다시 열려요`
+            });
         } finally {
             this._isSyncingBrain = false;
             _autoSyncRunning = false;
