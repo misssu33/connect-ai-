@@ -1573,6 +1573,64 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    // ============================================================
+    // 📊 Header status bar — folder + GitHub status, always visible
+    // ============================================================
+    private _sendStatusUpdate() {
+        if (!this._view) return;
+        const cfg = vscode.workspace.getConfiguration('connectAiLab');
+        const folderPath = _isBrainDirExplicitlySet() ? _getBrainDir() : '';
+        let fileCount = 0;
+        if (folderPath && fs.existsSync(folderPath)) {
+            try { fileCount = this._findBrainFiles(folderPath).length; } catch { /* ignore */ }
+        }
+        const githubUrl = cfg.get<string>('secondBrainRepo', '') || '';
+        // Last-sync time computed from latest commit on the brain repo, if any
+        let lastSync = '';
+        if (folderPath && fs.existsSync(path.join(folderPath, '.git'))) {
+            const out = gitExecSafe(['log', '-1', '--format=%cr'], folderPath);
+            if (out) lastSync = out.trim();
+        }
+        this._view.webview.postMessage({
+            type: 'statusUpdate',
+            value: {
+                folderPath,
+                fileCount,
+                githubUrl,
+                lastSync,
+                syncing: this._isSyncingBrain || _autoSyncRunning
+            }
+        });
+    }
+
+    private async _handleStatusFolderClick() {
+        const isSet = _isBrainDirExplicitlySet();
+        if (!isSet) {
+            // Not configured yet → kick off folder selection
+            await _ensureBrainDir();
+            this._sendStatusUpdate();
+            return;
+        }
+        // Configured → reveal folder in OS file explorer
+        const dir = _getBrainDir();
+        if (fs.existsSync(dir)) {
+            await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(dir));
+        }
+    }
+
+    private async _handleStatusGitClick() {
+        const cfg = vscode.workspace.getConfiguration('connectAiLab');
+        const url = cfg.get<string>('secondBrainRepo', '');
+        if (!url) {
+            // Not configured → open the brain menu so user can set it up
+            await this._handleBrainMenu();
+        } else {
+            // Configured → trigger sync now
+            await this._syncSecondBrain();
+        }
+        this._sendStatusUpdate();
+    }
+
     /** Build the same HTML that showBrainNetwork uses — kept inline for reuse. */
     private _buildThinkingHtml(graph: BrainGraph): string {
         const graphJson = JSON.stringify({
@@ -1711,6 +1769,15 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'toggleThinking':
                     await this._toggleThinkingMode();
+                    break;
+                case 'requestStatus':
+                    this._sendStatusUpdate();
+                    break;
+                case 'statusFolderClick':
+                    await this._handleStatusFolderClick();
+                    break;
+                case 'statusGitClick':
+                    await this._handleStatusGitClick();
                     break;
                 case 'highlightBrainNote':
                     if (typeof msg.note === 'string') {
@@ -1870,8 +1937,9 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
         }
         
         const safeTitles = injectedTitles.join(', ');
-        
+
         _safeGitAutoSync(brainDir, `Auto-Inject Knowledge [Raw]: ${safeTitles}`, this);
+        this._sendStatusUpdate();
             
         setTimeout(() => {
             let combinedContent = '';
@@ -2265,6 +2333,7 @@ class SidebarChatProvider implements vscode.WebviewViewProvider {
 
             vscode.window.showInformationMessage('✅ GitHub 동기화 완료!');
             this._view.webview.postMessage({ type: 'response', value: `✅ **동기화가 끝났어요!** (브랜치: \`${remoteBranch}\`)\n\n내 PC와 GitHub이 이제 완전히 똑같은 상태예요.\n\n앞으로 AI가 답변할 때 이 지식들을 참고합니다. (지식 모드: 🟢 ON)` });
+            this._sendStatusUpdate();
         } catch (error: any) {
             const userMsg = error?.message || '알 수 없는 문제가 생겼어요';
             vscode.window.showErrorMessage(`동기화 실패: ${userMsg}`);
@@ -3343,6 +3412,18 @@ select:hover,select:focus{border-color:var(--accent);box-shadow:0 0 12px var(--a
 .quick-actions{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:14px;padding:0 10px}
 .qa-btn{background:var(--surface);border:1px solid var(--border2);color:var(--text);padding:7px 12px;border-radius:18px;font-size:11px;cursor:pointer;font-family:inherit;transition:all .25s;backdrop-filter:blur(8px)}
 .qa-btn:hover{color:var(--text-bright);border-color:var(--accent);background:var(--surface2);transform:translateY(-1px);box-shadow:0 4px 12px var(--accent-glow)}
+.ag-badge{display:inline-flex;align-items:center;gap:5px;background:linear-gradient(135deg,rgba(66,133,244,.15),rgba(0,255,102,.1));border:1px solid rgba(66,133,244,.35);color:#4285F4;padding:4px 12px;border-radius:14px;font-size:10px;font-weight:600;letter-spacing:.3px;margin-bottom:14px;text-transform:uppercase;box-shadow:0 0 16px rgba(66,133,244,.15)}
+/* Header Status Bar (folder + github status, always visible) */
+.status-bar{display:flex;align-items:center;gap:8px;padding:6px 14px;background:rgba(8,8,12,.85);border-bottom:1px solid var(--border);font-size:10px;color:var(--text-dim);backdrop-filter:blur(12px);flex-shrink:0;z-index:9}
+.status-bar .status-item{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:8px;cursor:pointer;transition:all .2s;border:1px solid transparent}
+.status-bar .status-item:hover{background:var(--surface2);color:var(--text);border-color:var(--border2)}
+.status-bar .status-item.warn{color:#ffab40}
+.status-bar .status-item.warn:hover{border-color:rgba(255,171,64,.3);background:rgba(255,171,64,.08)}
+.status-bar .status-item.ok{color:#00cc44}
+.status-bar .status-item.syncing{color:#00b7ff}
+.status-bar .status-item.syncing .status-icon{animation:spin 1.4s linear infinite}
+.status-bar .sep{opacity:.3}
+.status-bar .ag-mini{margin-left:auto;color:#4285F4;font-size:9px;font-weight:600;letter-spacing:.4px;opacity:.7}
 
 /* LOADING */
 .loading-wrap{padding-left:29px;padding-top:6px;display:flex;align-items:center;gap:10px}
@@ -3420,6 +3501,12 @@ body.init .input-wrap{max-width:680px;width:100%;margin:0 auto;transform:none;tr
 </style></head><body class="init">
 <div class="header"><div class="header-left"><div class="logo">\u2726</div><span class="brand">Connect AI</span></div><div class="header-right"><select id="modelSel"></select><button class="btn-icon" id="internetBtn" title="인터넷 검색 켜기 (현재: OFF)" style="opacity: 0.4; filter: grayscale(1);">🌐</button><button class="btn-icon" id="thinkingBtn" title="Thinking Mode — AI가 어떻게 생각하는지 시각화" style="opacity:0.5">🎬</button><button class="btn-icon" id="brainBtn" title="내 지식 관리">\ud83e\udde0</button><button class="btn-icon" id="settingsBtn" title="설정">\u2699\ufe0f</button><button class="btn-icon" id="newChatBtn" title="새 대화 시작">+</button></div></div>
 <div class="thinking-bar" id="thinkingBar"></div>
+<div class="status-bar" id="statusBar">
+  <span class="status-item" id="statFolder" title="지식 폴더 — 클릭하면 폴더 열림"><span class="status-icon">📁</span><span id="statFolderText">지식 폴더 미설정</span></span>
+  <span class="sep">·</span>
+  <span class="status-item" id="statGit" title="GitHub 백업 — 클릭하면 동기화"><span class="status-icon">☁️</span><span id="statGitText">GitHub 미연결</span></span>
+  <span class="ag-mini">⚡ ANTIGRAVITY</span>
+</div>
 <div class="main-view" id="mainView">
 <div class="chat" id="chat">
 <div id="welcomeRoot"></div></div>
@@ -3446,8 +3533,9 @@ thinkingBar=document.getElementById('thinkingBar');
 let loader=null,sending=false,pendingFiles=[],internetEnabled=false;
 function welcomeHtml(){
   return '<div class="welcome"><div class="welcome-logo">✦</div>'
+    + '<div class="ag-badge">⚡ Built for Antigravity</div>'
     + '<div class="welcome-title">안녕하세요! 무엇을 도와드릴까요?</div>'
-    + '<div class="welcome-sub">100% 로컬에서 동작하는 AI 코딩 도우미.<br>인터넷 없이, API 비용 없이, 내 PC에서 바로 실행됩니다.</div>'
+    + '<div class="welcome-sub">내 지식과 연결된 100% 로컬 AI 워크스페이스.<br>인터넷 없이, API 비용 없이, 내 PC에서 바로 실행됩니다.</div>'
     + '<div class="quick-actions">'
     + '<button class="qa-btn" data-prompt="현재 열린 파일에 대해 설명해줘">📖 코드 설명해줘</button>'
     + '<button class="qa-btn" data-prompt="이 프로젝트에서 버그나 개선점을 찾아줘">🐛 버그 찾아줘</button>'
@@ -3629,6 +3717,41 @@ settingsBtn.addEventListener('click',()=>vscode.postMessage({type:'openSettings'
 brainBtn.addEventListener('click',()=>vscode.postMessage({type:'syncBrain'}));
 let thinkingModeOn=false;
 thinkingBtn.addEventListener('click',()=>vscode.postMessage({type:'toggleThinking'}));
+const statFolder=document.getElementById('statFolder'),statFolderText=document.getElementById('statFolderText');
+const statGit=document.getElementById('statGit'),statGitText=document.getElementById('statGitText');
+statFolder.addEventListener('click',()=>vscode.postMessage({type:'statusFolderClick'}));
+statGit.addEventListener('click',()=>vscode.postMessage({type:'statusGitClick'}));
+function updateStatus(s){
+  // s = { folderPath, fileCount, githubUrl, lastSync, syncing }
+  if(!s) return;
+  statFolder.classList.remove('warn','ok','syncing');
+  statGit.classList.remove('warn','ok','syncing');
+  if(!s.folderPath){
+    statFolder.classList.add('warn');
+    statFolderText.textContent='지식 폴더 선택하기';
+  } else {
+    statFolder.classList.add('ok');
+    statFolderText.textContent=(s.fileCount||0)+'개 지식';
+    statFolder.title='지식 폴더: '+s.folderPath+' (클릭하면 열림)';
+  }
+  if(s.syncing){
+    statGit.classList.add('syncing');
+    statGitText.textContent='동기화 중...';
+  } else if(!s.githubUrl){
+    statGit.classList.add('warn');
+    statGitText.textContent='GitHub 백업 설정';
+  } else {
+    statGit.classList.add('ok');
+    if(s.lastSync){
+      statGitText.textContent='동기화 OK · '+s.lastSync;
+    } else {
+      statGitText.textContent='GitHub 연결됨';
+    }
+    statGit.title='GitHub: '+s.githubUrl+' (클릭하면 지금 동기화)';
+  }
+}
+vscode.postMessage({type:'requestStatus'});
+setInterval(()=>vscode.postMessage({type:'requestStatus'}), 30000);
 stopBtn.addEventListener('click',()=>{vscode.postMessage({type:'stopGeneration'});hideLoader();setSending(false);if(streamBody){streamBody.classList.remove('stream-active')}streamEl=null;streamBody=null;});
 let streamEl=null,streamBody=null;
 window.addEventListener('message',e=>{const msg=e.data;switch(msg.type){
@@ -3661,6 +3784,9 @@ window.addEventListener('message',e=>{const msg=e.data;switch(msg.type){
     thinkingBtn.style.opacity = thinkingModeOn ? '1' : '0.5';
     thinkingBtn.style.background = thinkingModeOn ? 'linear-gradient(135deg,var(--accent),var(--accent2))' : '';
     thinkingBtn.title = thinkingModeOn ? 'Thinking Mode: ON (클릭으로 끄기)' : 'Thinking Mode — AI가 어떻게 생각하는지 시각화';
+    break;
+  case 'statusUpdate':
+    updateStatus(msg.value);
     break;
   case 'attachCitations': {
     // Find the most recent AI message and append citation chips
