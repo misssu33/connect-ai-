@@ -49,7 +49,7 @@
             "state": {
               "type": "search",
               "state": {
-                "query": "",
+                "query": "path:\"무제/\" ",
                 "matchingCase": false,
                 "explainSearch": false,
                 "collapseAll": false,
@@ -175,17 +175,18 @@
       "bases:새 베이스 생성하기": false
     }
   },
-  "active": "16b1f325d21e9bed",
+  "active": "d23baf00cd8e099b",
   "lastOpenFiles": [
-    "첫번째기억.md",
+    "2026-04-29.md",
     "무제.md",
     "무제",
+    "무제.base",
+    "무제.canvas",
+    "첫번째기억.md",
     "2026-04-26.md",
     "무제 1.canvas",
-    "무제.canvas",
     "무제 1.base",
     "무제 2.base",
-    "무제.base",
     "치타 사람 이미지 프롬프트.md",
     "치타 사람 이미지 프롬프트.md",
     "환영합니다!.md",
